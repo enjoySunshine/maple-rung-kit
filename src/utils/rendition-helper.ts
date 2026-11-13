@@ -17,11 +17,45 @@ export type CodecSetTier = {
   minFramerate: number;
   minIndex: number;
   maxScore: number;
+  scores: Array<{ bitrate: number; score: number }>;
   videoRanges: Record<string, number>;
   channels: Record<string, number>;
   hasDefaultAudio: boolean;
   fragmentError: number;
 };
+
+/**
+ * Returns the highest SCORE of the variants in a codec set that fit within the
+ * given bandwidth. Variants that would stall are not candidates no matter how
+ * high their SCORE, so they do not contribute a SCORE here.
+ */
+function getMaxScoreWithinBw(tier: CodecSetTier, bw: number): number {
+  let maxScore = 0;
+  for (const variant of tier.scores) {
+    if (variant.bitrate <= bw) {
+      maxScore = Math.max(maxScore, variant.score);
+    }
+  }
+  return maxScore;
+}
+
+/**
+ * Returns the highest bitrate of the variants in a codec set that have the
+ * given SCORE and fit within the given bandwidth.
+ */
+function getMaxBitrateWithScoreWithinBw(
+  tier: CodecSetTier,
+  bw: number,
+  score: number,
+): number {
+  let maxBitrate = 0;
+  for (const variant of tier.scores) {
+    if (variant.score === score && variant.bitrate <= bw) {
+      maxBitrate = Math.max(maxBitrate, variant.bitrate);
+    }
+  }
+  return maxBitrate;
+}
 
 type AudioTrackGroup = {
   tracks: MediaPlaylist[];
@@ -58,6 +92,7 @@ export function getStartCodecTier(
   let minBitrate = Infinity;
   let minIndex = Infinity;
   let selectedScore = 0;
+  let selectedBitrate = 0;
   let videoRanges: Array<VideoRange> = [];
 
   const { preferHDR, allowedVideoRanges } = getVideoSelectionOptions(
@@ -180,25 +215,53 @@ export function getStartCodecTier(
           );
           return selected;
         }
-        if (candidateTier.maxScore < selectedScore) {
+        // Variants that would stall are not candidates, regardless of their
+        // SCORE, so only SCOREs of variants within the estimate can be used
+        // to compare adaptation sets
+        const candidateScore = getMaxScoreWithinBw(candidateTier, currentBw);
+        if (candidateScore < selectedScore) {
           logStartCodecCandidateIgnored(
             candidate,
-            `max score of ${candidateTier.maxScore} < selected max of ${selectedScore}`,
+            `max score of ${candidateScore} within estimate of ${currentBw} < selected max of ${selectedScore}`,
           );
           return selected;
         }
+        // When SCOREs are equal, prefer the higher bitrate within the
+        // estimate, and then codec selection preference
+        if (candidateScore === selectedScore && selected) {
+          const candidateBitrate = getMaxBitrateWithScoreWithinBw(
+            candidateTier,
+            currentBw,
+            candidateScore,
+          );
+          if (
+            candidateBitrate < selectedBitrate ||
+            (candidateBitrate === selectedBitrate &&
+              codecsSetSelectionPreferenceValue(candidate) >=
+                codecsSetSelectionPreferenceValue(selected))
+          ) {
+            logStartCodecCandidateIgnored(
+              candidate,
+              `max bitrate of ${candidateBitrate} with score of ${candidateScore} within estimate of ${currentBw} < selected max of ${selectedBitrate}`,
+            );
+            return selected;
+          }
+        }
       }
-      // Remove candiates with less preferred codecs or more errors
+      // Remove candiates with more errors
       if (
         selected &&
-        (codecsSetSelectionPreferenceValue(candidate) >=
-          codecsSetSelectionPreferenceValue(selected) ||
-          candidateTier.fragmentError > codecTiers[selected].fragmentError)
+        candidateTier.fragmentError > codecTiers[selected].fragmentError
       ) {
         return selected;
       }
       minIndex = candidateTier.minIndex;
-      selectedScore = candidateTier.maxScore;
+      selectedScore = getMaxScoreWithinBw(candidateTier, currentBw);
+      selectedBitrate = getMaxBitrateWithScoreWithinBw(
+        candidateTier,
+        currentBw,
+        selectedScore,
+      );
       return candidate;
     },
     undefined,
@@ -280,6 +343,7 @@ export function getCodecTiers(
           minFramerate: Infinity,
           minIndex: index,
           maxScore: 0,
+          scores: [],
           videoRanges: { SDR: 0 },
           channels: { '2': 0 },
           hasDefaultAudio: !audioGroups,
@@ -292,6 +356,10 @@ export function getCodecTiers(
       tier.minFramerate = Math.min(tier.minFramerate, level.frameRate);
       tier.minIndex = Math.min(tier.minIndex, index);
       tier.maxScore = Math.max(tier.maxScore, level.score);
+      tier.scores.push({
+        bitrate: level.maxBitrate,
+        score: level.score,
+      });
       tier.fragmentError += level.fragmentError;
       tier.videoRanges[level.videoRange] =
         (tier.videoRanges[level.videoRange] || 0) + 1;

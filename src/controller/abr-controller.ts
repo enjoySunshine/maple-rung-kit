@@ -846,6 +846,12 @@ class AbrController extends Logger implements AbrComponentAPI {
 
     const ttfbEstimateSec = this.bwEstimator.getEstimateTTFB() / 1000;
     const levelsSkipped: number[] = [];
+    let bestLevel = -1;
+    let bestLevelScore = -1;
+    let bestLevelAdjustedBw = 0;
+    let bestLevelBitrate = 0;
+    let bestLevelFetchDuration = 0;
+    let bestLevelAvgDuration = 0;
     for (let i = maxAutoLevel; i >= minAutoLevel; i--) {
       const levelInfo = levels[i];
       const upSwitch = i > selectionBaseLevel;
@@ -995,44 +1001,63 @@ class AbrController extends Logger implements AbrComponentAPI {
           (live && !this.bitrateTestDelay) ||
           fetchDuration < maxFetchDuration);
       if (canSwitchWithinTolerance) {
-        const forcedAutoLevel = this.forcedAutoLevel;
-        if (
-          i !== loadLevel &&
-          (forcedAutoLevel === -1 || forcedAutoLevel !== loadLevel)
-        ) {
-          if (levelsSkipped.length) {
-            this.trace(
-              `Skipped level(s) ${levelsSkipped.join(
-                ',',
-              )} of ${maxAutoLevel} max with CODECS and VIDEO-RANGE:"${
-                levels[levelsSkipped[0]].codecs
-              }" ${levels[levelsSkipped[0]].videoRange}; not compatible with "${
-                currentCodecSet
-              }" ${currentVideoRange}`,
-            );
+        // Of the variants that can be selected without stalling, prefer the
+        // one with the highest SCORE. The loop runs from highest to lowest
+        // bandwidth, so the first variant encountered with a given SCORE is
+        // the highest bandwidth variant with that SCORE.
+        const levelScore = levelInfo.score;
+        if (levelScore > bestLevelScore) {
+          bestLevel = i;
+          bestLevelScore = levelScore;
+          bestLevelAdjustedBw = adjustedbw;
+          bestLevelBitrate = bitrate;
+          bestLevelFetchDuration = fetchDuration;
+          bestLevelAvgDuration = avgDuration;
+          if (firstSelection) {
+            this.firstSelection = i;
           }
-          this.info(
-            `switch candidate:${selectionBaseLevel}->${i} adjustedbw(${Math.round(
-              adjustedbw,
-            )})-bitrate=${Math.round(
-              adjustedbw - bitrate,
-            )} ttfb:${ttfbEstimateSec.toFixed(
-              1,
-            )} avgDuration:${avgDuration.toFixed(
-              1,
-            )} maxFetchDuration:${maxFetchDuration.toFixed(
-              1,
-            )} fetchDuration:${fetchDuration.toFixed(
-              1,
-            )} firstSelection:${firstSelection} codecSet:${levelInfo.codecSet} videoRange:${levelInfo.videoRange} hls.loadLevel:${loadLevel}`,
+        }
+      }
+    }
+    if (bestLevel > -1) {
+      const forcedAutoLevel = this.forcedAutoLevel;
+      if (
+        bestLevel !== loadLevel &&
+        (forcedAutoLevel === -1 || forcedAutoLevel !== loadLevel)
+      ) {
+        if (levelsSkipped.length) {
+          this.trace(
+            `Skipped level(s) ${levelsSkipped.join(
+              ',',
+            )} of ${maxAutoLevel} with CODECS and VIDEO-RANGE:"${
+              levels[levelsSkipped[0]].codecs
+            }" ${levels[levelsSkipped[0]].videoRange}; not compatible with "${
+              currentCodecSet
+            }" ${currentVideoRange}`,
           );
         }
-        if (firstSelection) {
-          this.firstSelection = i;
-        }
-        // as we are looping from highest to lowest, this will return the best achievable quality level
-        return i;
+        const bestLevelInfo = levels[bestLevel];
+        this.info(
+          `switch candidate:${selectionBaseLevel}->${bestLevel} adjustedbw(${Math.round(
+            bestLevelAdjustedBw,
+          )})-bitrate=${Math.round(
+            bestLevelAdjustedBw - bestLevelBitrate,
+          )} ttfb:${ttfbEstimateSec.toFixed(
+            1,
+          )} avgDuration:${bestLevelAvgDuration.toFixed(
+            1,
+          )} maxFetchDuration:${maxFetchDuration.toFixed(
+            1,
+          )} fetchDuration:${bestLevelFetchDuration.toFixed(
+            1,
+          )} firstSelection:${firstSelection} codecSet:${
+            bestLevelInfo.codecSet
+          } videoRange:${bestLevelInfo.videoRange} score:${
+            bestLevelInfo.score
+          } hls.loadLevel:${loadLevel}`,
+        );
       }
+      return bestLevel;
     }
     // not enough time budget even with quality level 0 ... rebuffering might happen
     return -1;
